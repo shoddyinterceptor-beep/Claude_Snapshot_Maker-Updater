@@ -695,17 +695,20 @@ function readDir(entry,pathPrefix,files,refOnly,ghosts,done){
           if(INTAKE_SKIP_DIRS.has(en.name)){/* drop entire subtree, no trace */}
           else{p++;readDir(en,entryPath,files,refOnly,ghosts,()=>{p--;if(!p)done();});}
         } else {
-          // Extension check BEFORE entry.file() — but instead of dropping
-          // with zero trace, individual hard-skip-ext files become a
-          // lightweight ghost entry: visible in the tree, skip by default,
-          // promotable to reference. No File object, no content ever read.
+          // Extension check BEFORE we keep the File object — but instead of
+          // dropping with zero trace, individual hard-skip-ext files become
+          // a lightweight ghost entry: visible in tree, skip by default,
+          // promotable to reference. We still call entry.file() to get the
+          // size (getMetadata is flaky/unreliable on some Chromium builds
+          // and can silently hang the whole subtree) — the File object is
+          // immediately discarded after reading .size, never stored.
           if(INTAKE_SKIP_EXTS.has(extOf(en.name))){
             p++;
-            en.getMetadata(meta=>{
-              ghosts.push({path:entryPath,sizeKB:Math.round((meta.size||0)/1024)});
+            en.file(f=>{
+              ghosts.push({path:entryPath,sizeKB:Math.round(f.size/1024)});
               p--;if(!p)done();
             },()=>{
-              // getMetadata can fail on some browsers/entries — fall back to size-less ghost
+              // Even entry.file() failed — still record the ghost, just sizeless
               ghosts.push({path:entryPath,sizeKB:0});
               p--;if(!p)done();
             });
