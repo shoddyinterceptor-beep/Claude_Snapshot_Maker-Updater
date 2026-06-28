@@ -254,7 +254,7 @@ details[open] summary{color:#aaa}
     <div id="drop-zone">
       <i class="ti ti-folder-plus dz-icon"></i>
       <div class="dz-title">Drag & drop your project folder here</div>
-      <div class="dz-sub">Intake filter runs at drop — binaries, build artifacts, and cache dirs are rejected before they ever load</div>
+      <div class="dz-sub">Build caches & heavy dirs (target, node_modules, .git) are never walked. Binaries inside normal folders still show up — skipped by default, right-click to reference.</div>
       <div style="margin-top:10px"><span class="dz-badge"><i class="ti ti-shield-check" style="font-size:11px"></i> Recommended for large projects</span></div>
     </div>
     <div class="picker-row">
@@ -298,6 +298,7 @@ details[open] summary{color:#aaa}
       <span class="li"><span class="ld" style="background:#1a5a1a;border:.5px solid #336633"></span>pack</span>
       <span class="li"><span class="ld" style="background:#554400;border:.5px solid #887700"></span>ref</span>
       <span class="li"><span class="ld" style="background:#2a2a35;border:.5px solid #444"></span>skip</span>
+      <span class="li"><span class="ld" style="background:#221a00;border:.5px solid #443300"></span>binary (ghost)</span>
       <span class="li"><span class="ld" style="background:#223388;border:.5px solid #5566cc"></span>manual</span>
     </div>
   </div>
@@ -429,7 +430,7 @@ const TYPES={
 
 // ── State ──
 let activeType='none',unknownDefault='ref',manualState={},treeDefault='depth1';
-let allFiles=[],refOnlyItems=[],snapshotText='',flatRows=[],selected=new Set(),lastClickIdx=-1;
+let allFiles=[],refOnlyItems=[],ghostItems=[],snapshotText='',flatRows=[],selected=new Set(),lastClickIdx=-1;
 let pendingSessionData=null,pendingDropFiles=null;
 const collapsed=new Set();
 
@@ -487,7 +488,7 @@ function setTreeDefault(val){
 
 function applyTreeDefault(){
   collapsed.clear();
-  const tree=buildTree(allFiles,refOnlyItems);
+  const tree=buildTree(allFiles,refOnlyItems,ghostItems);
   if(treeDefault==='collapsed'){
     collectDirPaths(tree,'',()=>true);
   } else if(treeDefault==='depth1'){
@@ -508,7 +509,7 @@ function collectDirPaths(nodes,parentPath,shouldCollapse){
 
 function expandAll(){collapsed.clear();renderTree();}
 function collapseAll(){
-  collectDirPaths(buildTree(allFiles,refOnlyItems),'',()=>true);
+  collectDirPaths(buildTree(allFiles,refOnlyItems,ghostItems),'',()=>true);
   renderTree();
 }
 
@@ -556,7 +557,7 @@ function applySessionData(data,files){
     document.getElementById('remap-modal').classList.add('show');return;
   }
   applySessionSettings(data);manualState={...data.manualState};updateManualBtn();
-  if(files)finalizeLoad(files,[],false);
+  if(files)finalizeLoad(files,[],[],false);
   else{renderTree();updatePreview();}
   setSessionStatus(`Session loaded — ${Object.keys(data.manualState).length} marks restored`,'ok');
   pendingSessionData=null;pendingDropFiles=null;
@@ -588,7 +589,7 @@ function remapAndApply(){
   }
   data.manualState=remapped;data.projectRoot=newRoot;
   applySessionSettings(data);manualState={...data.manualState};updateManualBtn();
-  if(files)finalizeLoad(files,[],false);
+  if(files)finalizeLoad(files,[],[],false);
   else{renderTree();updatePreview();}
   setSessionStatus(`Remapped ${sessionRoot}→${newRoot}, ${Object.keys(data.manualState).length} marks restored`,'ok');
   pendingSessionData=null;pendingDropFiles=null;
@@ -597,7 +598,7 @@ function remapAndApply(){
 function applySessionAsIs(){
   closeRemap();const data=pendingSessionData;const files=pendingDropFiles;
   applySessionSettings(data);manualState={...data.manualState};updateManualBtn();
-  if(files)finalizeLoad(files,[],false);
+  if(files)finalizeLoad(files,[],[],false);
   else{renderTree();updatePreview();}
   setSessionStatus(`Session loaded (paths may not match)`,'warn');
   pendingSessionData=null;pendingDropFiles=null;
@@ -615,20 +616,19 @@ function proceedWithPicker(){closePicker();document.getElementById('fi-initial')
 document.getElementById('fi-initial').addEventListener('change',function(){
   const raw=Array.from(this.files);if(!raw.length)return;
   showIntakeProgress('Filtering (no intake filter — all files already loaded by browser)…');
-  // Post-load filter — damage already done memory-wise, but at least clean up allFiles array
   setTimeout(()=>{
-    const files=[],refOnly=[];
+    const files=[],refOnly=[],ghosts=[];
     for(const f of raw){
       const path=f.webkitRelativePath||f.name;
       const parts=path.split('/');
       const fname=parts[parts.length-1];
       if(parts.slice(0,-1).some(p=>INTAKE_SKIP_DIRS.has(p)))continue;
-      if(INTAKE_SKIP_EXTS.has(extOf(fname)))continue;
+      if(INTAKE_SKIP_EXTS.has(extOf(fname))){ghosts.push({path,sizeKB:Math.round(f.size/1024)});continue;}
       if(f.size>INTAKE_MAX_SIZE_KB*1024){refOnly.push({path,sizeKB:Math.round(f.size/1024)});continue;}
       files.push(f);
     }
     hideIntakeProgress();
-    loadFiles(files,refOnly,false);
+    loadFiles(files,refOnly,ghosts,false);
   },50);
   this.value='';
 });
@@ -637,17 +637,17 @@ document.getElementById('fi-update').addEventListener('change',function(){
   const raw=Array.from(this.files);if(!raw.length)return;
   showIntakeProgress('Filtering update…');
   setTimeout(()=>{
-    const files=[],refOnly=[];
+    const files=[],refOnly=[],ghosts=[];
     for(const f of raw){
       const path=f.webkitRelativePath||f.name;
       const parts=path.split('/');
       const fname=parts[parts.length-1];
       if(parts.slice(0,-1).some(p=>INTAKE_SKIP_DIRS.has(p)))continue;
-      if(INTAKE_SKIP_EXTS.has(extOf(fname)))continue;
+      if(INTAKE_SKIP_EXTS.has(extOf(fname))){ghosts.push({path,sizeKB:Math.round(f.size/1024)});continue;}
       if(f.size>INTAKE_MAX_SIZE_KB*1024){refOnly.push({path,sizeKB:Math.round(f.size/1024)});continue;}
       files.push(f);
     }
-    hideIntakeProgress();loadFiles(files,refOnly,true);
+    hideIntakeProgress();loadFiles(files,refOnly,ghosts,true);
   },50);
   this.value='';
 });
@@ -668,19 +668,21 @@ rdz.addEventListener('drop',e=>{e.preventDefault();rdz.classList.remove('drag-ov
 let intakeCount=0;
 function collectDrop(e,isUpdate){
   const items=e.dataTransfer.items;
-  const files=[],refOnly=[];let p=0;
+  const files=[],refOnly=[],ghosts=[];let p=0;
   intakeCount=0;showIntakeProgress('Scanning…');
   for(let i=0;i<items.length;i++){
     const en=items[i].webkitGetAsEntry&&items[i].webkitGetAsEntry();
     if(en&&en.isDirectory){
-      p++;readDir(en,en.name,files,refOnly,()=>{p--;if(!p)finishIntake(files,refOnly,isUpdate);});
+      p++;readDir(en,en.name,files,refOnly,ghosts,()=>{p--;if(!p)finishIntake(files,refOnly,ghosts,isUpdate);});
     }
   }
-  if(!p){hideIntakeProgress();loadFiles([],[],isUpdate);}
+  if(!p){hideIntakeProgress();loadFiles([],[],[],isUpdate);}
 }
 
-function readDir(entry,pathPrefix,files,refOnly,done){
-  // Hard reject entire directory at intake — never recurse
+function readDir(entry,pathPrefix,files,refOnly,ghosts,done){
+  // Hard reject entire directory at intake — never recurse.
+  // This stays aggressive: target/, node_modules/, .git/ etc can contain
+  // tens of thousands of files and walking them defeats the performance fix.
   if(INTAKE_SKIP_DIRS.has(entry.name)){done();return;}
   const reader=entry.createReader();let p=0;
   function batch(){
@@ -690,11 +692,24 @@ function readDir(entry,pathPrefix,files,refOnly,done){
         const entryPath=pathPrefix+'/'+en.name;
         if(en.isDirectory){
           // Skip dir check BEFORE recursing
-          if(INTAKE_SKIP_DIRS.has(en.name)){/* drop */}
-          else{p++;readDir(en,entryPath,files,refOnly,()=>{p--;if(!p)done();});}
+          if(INTAKE_SKIP_DIRS.has(en.name)){/* drop entire subtree, no trace */}
+          else{p++;readDir(en,entryPath,files,refOnly,ghosts,()=>{p--;if(!p)done();});}
         } else {
-          // Extension check BEFORE entry.file()
-          if(INTAKE_SKIP_EXTS.has(extOf(en.name))){/* drop */}
+          // Extension check BEFORE entry.file() — but instead of dropping
+          // with zero trace, individual hard-skip-ext files become a
+          // lightweight ghost entry: visible in the tree, skip by default,
+          // promotable to reference. No File object, no content ever read.
+          if(INTAKE_SKIP_EXTS.has(extOf(en.name))){
+            p++;
+            en.getMetadata(meta=>{
+              ghosts.push({path:entryPath,sizeKB:Math.round((meta.size||0)/1024)});
+              p--;if(!p)done();
+            },()=>{
+              // getMetadata can fail on some browsers/entries — fall back to size-less ghost
+              ghosts.push({path:entryPath,sizeKB:0});
+              p--;if(!p)done();
+            });
+          }
           else{
             p++;
             en.file(f=>{
@@ -720,19 +735,19 @@ function showIntakeProgress(msg){
 }
 function hideIntakeProgress(){document.getElementById('intake-progress').style.display='none';}
 function updateIntakeProgress(msg){document.getElementById('intake-msg').textContent=msg;}
-function finishIntake(files,refOnly,isUpdate){hideIntakeProgress();loadFiles(files,refOnly,isUpdate);}
+function finishIntake(files,refOnly,ghosts,isUpdate){hideIntakeProgress();loadFiles(files,refOnly,ghosts,isUpdate);}
 
 // ── Load files ──
-function loadFiles(files,refOnly,isUpdate){
-  if(!files.length&&!refOnly.length)return;
+function loadFiles(files,refOnly,ghosts,isUpdate){
+  if(!files.length&&!refOnly.length&&!ghosts.length)return;
   if(!isUpdate&&pendingSessionData){
     const data=pendingSessionData;pendingSessionData=null;
-    allFiles=files;refOnlyItems=refOnly;
+    allFiles=files;refOnlyItems=refOnly;ghostItems=ghosts;
     applySessionData(data,files);return;
   }
   if(isUpdate){
-    const prevPaths=new Set([...allFiles.map(f=>f.webkitRelativePath||f.name),...refOnlyItems.map(r=>r.path)]);
-    const newPaths=new Set([...files.map(f=>f.webkitRelativePath||f.name),...refOnly.map(r=>r.path)]);
+    const prevPaths=new Set([...allFiles.map(f=>f.webkitRelativePath||f.name),...refOnlyItems.map(r=>r.path),...ghostItems.map(g=>g.path)]);
+    const newPaths=new Set([...files.map(f=>f.webkitRelativePath||f.name),...refOnly.map(r=>r.path),...ghosts.map(g=>g.path)]);
     const added=[...newPaths].filter(p=>!prevPaths.has(p));
     const removed=[...prevPaths].filter(p=>!newPaths.has(p));
     const orphaned=Object.keys(manualState).filter(p=>!newPaths.has(p));
@@ -754,16 +769,16 @@ function loadFiles(files,refOnly,isUpdate){
     document.getElementById('filter-card').style.display='block';
     document.getElementById('build-card').style.display='block';
   }
-  finalizeLoad(files,refOnly,isUpdate);
+  finalizeLoad(files,refOnly,ghosts,isUpdate);
 }
 
-function finalizeLoad(files,refOnly,isUpdate){
-  allFiles=files;refOnlyItems=refOnly;
+function finalizeLoad(files,refOnly,ghosts,isUpdate){
+  allFiles=files;refOnlyItems=refOnly;ghostItems=ghosts;
   snapshotText='';selected=new Set();lastClickIdx=-1;
-  const allPaths=[...files.map(f=>f.webkitRelativePath||f.name),...refOnly.map(r=>r.path)];
+  const allPaths=[...files.map(f=>f.webkitRelativePath||f.name),...refOnly.map(r=>r.path),...ghosts.map(g=>g.path)];
   const root=allPaths.length?allPaths[0].split('/')[0]:'';
   document.getElementById('folder-name').textContent=root;
-  document.getElementById('file-count').textContent=files.length+' files · '+refOnly.length+' large refs';
+  document.getElementById('file-count').textContent=files.length+' files · '+refOnly.length+' large refs · '+ghosts.length+' binary/skip';
   document.getElementById('save-btn').style.display='none';
   document.getElementById('log').style.display='none';
   document.getElementById('save-session-btn').disabled=false;
@@ -779,6 +794,17 @@ function getManualSettings(){
     names:document.getElementById('exc-names').value.split(',').map(s=>s.trim()).filter(Boolean),
     maxKB:parseInt(document.getElementById('exc-size').value)||500
   };
+}
+
+// Ghost fate — hard-skipped binaries. Default: skip (invisible-by-default
+// behavior preserved), but fully visible and promotable via manual marks.
+// Never eligible for 'pack' — promoting a ghost always means 'ref' at most,
+// since packing raw binary content as text would corrupt the snapshot.
+function resolveGhostFate(path){
+  const man=getManualInherit(path);
+  if(man==='ref')return'ref';
+  if(man==='pack')return'ref'; // binaries can't be text-packed; cap at ref
+  return'skip';
 }
 
 function resolveFileFate(f){
@@ -826,7 +852,7 @@ function resolveDirDisplay(dirPath){
   return{state:null,src:null};
 }
 
-function buildTree(files,refOnly){
+function buildTree(files,refOnly,ghosts){
   const root={};
   function ins(path,node){
     const parts=path.split('/');let cur=root;
@@ -836,14 +862,15 @@ function buildTree(files,refOnly){
     }
     cur[parts[parts.length-1]]=node;
   }
-  for(const f of files)ins(f.webkitRelativePath||f.name,{__dir:false,__f:f,__refOnly:false});
-  for(const r of (refOnly||[]))ins(r.path,{__dir:false,__f:null,__refOnly:true,__path:r.path,__sizeKB:r.sizeKB});
+  for(const f of files)ins(f.webkitRelativePath||f.name,{__dir:false,__f:f,__refOnly:false,__ghost:false});
+  for(const r of (refOnly||[]))ins(r.path,{__dir:false,__f:null,__refOnly:true,__ghost:false,__path:r.path,__sizeKB:r.sizeKB});
+  for(const g of (ghosts||[]))ins(g.path,{__dir:false,__f:null,__refOnly:false,__ghost:true,__path:g.path,__sizeKB:g.sizeKB});
   return root;
 }
 
 function renderTree(){
   tc.innerHTML='';flatRows=[];
-  const tree=buildTree(allFiles,refOnlyItems);
+  const tree=buildTree(allFiles,refOnlyItems,ghostItems);
   function walk(nodes,parentPath,depth){
     const sorted=Object.keys(nodes).sort((a,b)=>{
       if(nodes[a].__dir&&!nodes[b].__dir)return-1;
@@ -877,6 +904,21 @@ function renderTree(){
         const nm=document.createElement('span');nm.className='name';nm.textContent=name;if(!isSel)nm.style.color='#664400';row.appendChild(nm);
         const sz=document.createElement('span');sz.className='sz';sz.textContent=node.__sizeKB+'KB';row.appendChild(sz);
         const b=document.createElement('span');b.className='badge b-ref';b.textContent='large·ref';row.appendChild(b);
+      } else if(node.__ghost){
+        // Hard-skipped binary/extension — visible ghost entry, no File object ever existed.
+        // Default fate is skip; right-click can promote to reference only (never pack).
+        const gfate=resolveGhostFate(path);
+        const hasManual=getManualInherit(path)!==null;
+        if(!isSel&&gfate==='skip')row.classList.add('nd');
+        const sp=document.createElement('div');sp.style.cssText='width:12px;flex-shrink:0';row.appendChild(sp);
+        const ic=document.createElement('i');ic.className='ti ti-file-binary icon';
+        ic.style.color=isSel?'var(--acc)':gfate==='ref'?'#664400':'#2a2a35';row.appendChild(ic);
+        const nm=document.createElement('span');nm.className='name';nm.textContent=name;
+        if(!isSel)nm.style.color=gfate==='ref'?'#887700':'#3a3a45';row.appendChild(nm);
+        const sz=document.createElement('span');sz.className='sz';sz.textContent=node.__sizeKB>0?node.__sizeKB+'KB':'';row.appendChild(sz);
+        if(gfate==='ref'){const b=document.createElement('span');b.className='badge b-ref';b.textContent='ref';row.appendChild(b);}
+        else{const b=document.createElement('span');b.className='badge b-skip';b.textContent='binary·skip';row.appendChild(b);}
+        if(hasManual){const b=document.createElement('span');b.className='badge b-man';b.textContent='manual';row.appendChild(b);}
       } else {
         const fate=resolveFileFate(node.__f);
         const hasManual=getManualInherit(path)!==null;
@@ -941,6 +983,10 @@ function updatePreview(){
   let pack=0,ref=0,skip=0;
   for(const f of allFiles){const fate=resolveFileFate(f);if(fate==='pack')pack++;else if(fate==='ref')ref++;else skip++;}
   ref+=refOnlyItems.length;
+  for(const g of ghostItems){
+    const gfate=resolveGhostFate(g.path);
+    if(gfate==='ref')ref++;else skip++;
+  }
   const bar=document.getElementById('preview-bar');bar.style.display='block';
   const mc=Object.keys(manualState).length;
   bar.innerHTML=`<span style="color:#44aa44">${pack}</span> will be packed &nbsp;·&nbsp; `+
@@ -968,6 +1014,11 @@ async function buildSnapshot(){
     else if(fate==='pack')packs.push(f);
   }
   for(const r of refOnlyItems)refs.push({type:'meta',path:r.path,sizeKB:r.sizeKB});
+  // Ghosts promoted to ref via manual mark join the reference list too.
+  // Ghosts left at default (skip) are omitted entirely, same as before.
+  for(const g of ghostItems){
+    if(resolveGhostFate(g.path)==='ref')refs.push({type:'meta',path:g.path,sizeKB:g.sizeKB});
+  }
 
   if(refs.length){
     snapshotText+='=== REFERENCE FILES (known to project, not packed) ===\n';
@@ -1025,7 +1076,7 @@ async function saveSnapshot(){
 }
 
 function clearAll(){
-  allFiles=[];refOnlyItems=[];manualState={};snapshotText='';selected=new Set();lastClickIdx=-1;
+  allFiles=[];refOnlyItems=[];ghostItems=[];manualState={};snapshotText='';selected=new Set();lastClickIdx=-1;
   document.getElementById('fi-initial').value='';document.getElementById('fi-update').value='';collapsed.clear();
   document.getElementById('initial-zone').style.display='block';
   document.getElementById('folder-loaded').style.display='none';
